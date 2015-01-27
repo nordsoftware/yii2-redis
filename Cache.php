@@ -8,6 +8,7 @@
 namespace yii\redis;
 
 use Yii;
+use yii\base\Exception;
 use yii\base\InvalidConfigException;
 
 /**
@@ -101,7 +102,7 @@ class Cache extends \yii\caching\Cache
      */
     public function exists($key)
     {
-        return (bool) $this->redis->executeCommand('EXISTS', [$this->buildKey($key)]);
+        return (bool)$this->redis->executeCommand('EXISTS', [$this->buildKey($key)]);
     }
 
     /**
@@ -113,11 +114,27 @@ class Cache extends \yii\caching\Cache
     }
 
     /**
+     *
+     */
+    protected function getHValues($key)
+    {
+        return $this->redis->executeCommand('HGETALL', [$key]);
+    }
+
+    /**
+     *
+     */
+    protected function getHValue($key, $field)
+    {
+        return $this->redis->executeCommand('HGET', [$key, $field]);
+    }
+
+    /**
      * @inheritdoc
      */
-    protected function getValues($keys)
+    protected function getValues($keys, $command = 'MGET')
     {
-        $response = $this->redis->executeCommand('MGET', $keys);
+        $response = $this->redis->executeCommand($command, $keys);
         $result = [];
         $i = 0;
         foreach ($keys as $key) {
@@ -128,16 +145,126 @@ class Cache extends \yii\caching\Cache
     }
 
     /**
+     * Stores multiple items in cache. Each item contains a value identified by a key.
+     * If the cache already contains such a key, the existing value and
+     * expiration time will be replaced with the new ones, respectively.
+     *
+     * @param array $items the items to be cached, as key-value pairs.
+     * @param integer $duration default number of seconds in which the cached values will expire. 0 means never expire.
+     * @param Dependency $dependency dependency of the cached items. If the dependency changes,
+     * the corresponding values in the cache will be invalidated when it is fetched via [[get()]].
+     * This parameter is ignored if [[serializer]] is false.
+     * @return boolean whether the items are successfully stored into cache
+     * @TODO REWRITE THIS
+     */
+    public function hset($hashKey, $fieldName, $items, $duration = 0, $dependency = null)
+    {
+        if ($dependency !== null && $this->serializer !== false) {
+            $dependency->evaluateDependency($this);
+        }
+
+        $data = [];
+        if ($this->serializer === null) {
+            $value = serialize([$items, $dependency]);
+        } elseif ($this->serializer !== false) {
+            $value = call_user_func($this->serializer[0], [$items, $dependency]);
+        }
+
+        $key = $this->buildKey($hashKey);
+
+        return $this->setHValues($key, $fieldName, $value, $duration);
+    }
+
+    public function hget($key, $field)
+    {
+        $key = $this->buildKey($key);
+        $value = $this->getHValue($key, $field);
+        if ($value === false || $this->serializer === false) {
+            return $value;
+        } elseif ($this->serializer === null) {
+            $value = unserialize($value);
+        } else {
+            $value = call_user_func($this->serializer[1], $value);
+        }
+        if (is_array($value) && !($value[1] instanceof Dependency && $value[1]->getHasChanged($this))) {
+            return $value[0];
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * @TODO NOT working
+     * @param $key
+     * @return array|bool|mixed|null|string
+     */
+    public function hgetall($key)
+    {
+        $keyMap = [];
+//        foreach ($keys as $key) {
+//            $keyMap[$key] = $this->buildKey($key);
+//        }
+//        $values = $this->getValues(array_values($keyMap));
+//        $results = [];
+//        foreach ($keyMap as $key => $newKey) {
+//            $results[$key] = false;
+//            if (isset($values[$newKey])) {
+//                if ($this->serializer === false) {
+//                    $results[$key] = $values[$newKey];
+//                } else {
+//                    $value = $this->serializer === null ? unserialize($values[$newKey])
+//                        : call_user_func($this->serializer[1], $values[$newKey]);
+//
+//                    if (is_array($value) && !($value[1] instanceof Dependency && $value[1]->getHasChanged($this))) {
+//                        $results[$key] = $value[0];
+//                    }
+//                }
+//            }
+//        }
+//
+//
+        $key = $this->buildKey($key);
+        $value = $this->getHValues($key);
+        if ($value === false || $this->serializer === false) {
+            return $value;
+        } elseif ($this->serializer === null) {
+            foreach ($value as $_val) {
+                
+            }
+
+            $value = unserialize($value);
+        } else {
+            $value = call_user_func($this->serializer[1], $value);
+        }
+        if (is_array($value) && !($value[1] instanceof Dependency && $value[1]->getHasChanged($this))) {
+            return $value[0];
+        } else {
+            return false;
+        }
+    }
+
+    protected function setHValues($hashKey, $fieldName, $value, $expire)
+    {
+        if ($expire == 0) {
+            $return = $this->redis->executeCommand('HSET', [$hashKey, $fieldName, $value]);
+            return (bool)$return;
+        } else {
+            $expire = (int)($expire * 1000);
+
+            return (bool)$this->redis->executeCommand('HSET', [$hashKey, $fieldName, $value, 'PX', $expire]);
+        }
+    }
+
+    /**
      * @inheritdoc
      */
     protected function setValue($key, $value, $expire)
     {
         if ($expire == 0) {
-            return (bool) $this->redis->executeCommand('SET', [$key, $value]);
+            return (bool)$this->redis->executeCommand('SET', [$key, $value]);
         } else {
-            $expire = (int) ($expire * 1000);
-
-            return (bool) $this->redis->executeCommand('SET', [$key, $value, 'PX', $expire]);
+            $expire = (int)($expire * 1000);
+            return (bool)$this->redis->executeCommand('SET', [$key, $value, 'PX', $expire]);
         }
     }
 
@@ -156,7 +283,7 @@ class Cache extends \yii\caching\Cache
         if ($expire == 0) {
             $this->redis->executeCommand('MSET', $args);
         } else {
-            $expire = (int) ($expire * 1000);
+            $expire = (int)($expire * 1000);
             $this->redis->executeCommand('MULTI');
             $this->redis->executeCommand('MSET', $args);
             $index = [];
@@ -182,11 +309,11 @@ class Cache extends \yii\caching\Cache
     protected function addValue($key, $value, $expire)
     {
         if ($expire == 0) {
-            return (bool) $this->redis->executeCommand('SET', [$key, $value, 'NX']);
+            return (bool)$this->redis->executeCommand('SET', [$key, $value, 'NX']);
         } else {
-            $expire = (int) ($expire * 1000);
+            $expire = (int)($expire * 1000);
 
-            return (bool) $this->redis->executeCommand('SET', [$key, $value, 'PX', $expire, 'NX']);
+            return (bool)$this->redis->executeCommand('SET', [$key, $value, 'PX', $expire, 'NX']);
         }
     }
 
@@ -195,7 +322,7 @@ class Cache extends \yii\caching\Cache
      */
     protected function deleteValue($key)
     {
-        return (bool) $this->redis->executeCommand('DEL', [$key]);
+        return (bool)$this->redis->executeCommand('DEL', [$key]);
     }
 
     /**
